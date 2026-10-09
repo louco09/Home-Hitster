@@ -68,6 +68,8 @@
     </div>
 
     <button id="scan">Karte scannen</button>
+    <button class="ghost" id="photoBtn">Foto statt Live-Scan</button>
+    <input type="file" id="photo" accept="image/*" capture="environment" class="hidden">
     <div class="row">
       <button class="ghost" id="toggle" disabled>Pause</button>
       <button class="ghost" id="replay" disabled>Von vorn</button>
@@ -206,7 +208,7 @@ $("replay").onclick = () => currentUri && play(currentUri);
 let stream = null, scanning = false;
 async function startScan(){
   try{
-    stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:"environment"}},audio:false});
+    stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:"environment"},width:{ideal:1920},height:{ideal:1080}},audio:false});
   }catch(e){
     setStatus("Kamera nicht verfügbar. Auf dem Handy braucht die Seite HTTPS, am Rechner reicht 127.0.0.1.","err");
     return;
@@ -223,26 +225,62 @@ function stopScan(){
   $("viewfinder").style.display = "none";
   $("scan").textContent = "Nächste Karte scannen";
 }
-function tick(){
+const detector = ("BarcodeDetector" in window) ? new BarcodeDetector({formats:["qr_code"]}) : null;
+async function decodeSource(src, w, h){
+  if(detector){
+    try{ const r = await detector.detect(src); if(r.length && r[0].rawValue) return r[0].rawValue; }catch{}
+  }
+  if(typeof jsQR === "undefined") throw new Error("jsQR");
+  const c = $("canvas"), ctx = c.getContext("2d",{willReadFrequently:true});
+  for(const maxW of [1000, 640, 400]){
+    const s = Math.min(1, maxW / w);
+    c.width = Math.round(w*s); c.height = Math.round(h*s);
+    ctx.drawImage(src,0,0,c.width,c.height);
+    const img = ctx.getImageData(0,0,c.width,c.height);
+    const code = jsQR(img.data, img.width, img.height, {inversionAttempts:"attemptBoth"});
+    if(code && code.data) return code.data;
+  }
+  return null;
+}
+function handleCode(text){
+  const uri = parseTrack(text);
+  if(uri){ $("raw").textContent = ""; play(uri); }
+  else{ setStatus("QR-Code erkannt, aber kein Spotify-Song darin.","err"); $("raw").textContent = "Inhalt: "+text; }
+}
+let busy = false;
+async function tick(){
   if(!scanning) return;
   const v = $("video");
-  if(v.readyState === v.HAVE_ENOUGH_DATA){
-    const c = $("canvas"), ctx = c.getContext("2d",{willReadFrequently:true});
-    c.width = v.videoWidth; c.height = v.videoHeight;
-    ctx.drawImage(v,0,0,c.width,c.height);
-    const img = ctx.getImageData(0,0,c.width,c.height);
-    const code = jsQR(img.data, img.width, img.height, {inversionAttempts:"dontInvert"});
-    if(code && code.data){
-      const uri = parseTrack(code.data);
-      stopScan();
-      if(uri){ play(uri); }
-      else{ setStatus("QR-Code erkannt, aber kein Spotify-Song darin.","err"); $("raw").textContent = "Inhalt: "+code.data; }
+  if(!busy && v.readyState === v.HAVE_ENOUGH_DATA && v.videoWidth){
+    busy = true;
+    try{
+      const text = await decodeSource(v, v.videoWidth, v.videoHeight);
+      if(text){ busy = false; stopScan(); handleCode(text); return; }
+    }catch(e){
+      busy = false; stopScan();
+      setStatus("QR-Leser konnte nicht geladen werden (Netzwerk blockiert?). Nutze „Foto statt Live-Scan“.","err");
       return;
     }
+    busy = false;
   }
   requestAnimationFrame(tick);
 }
 $("scan").onclick = () => scanning ? (stopScan(), setStatus("Bereit. Karte scannen.")) : startScan();
+
+$("photoBtn").onclick = () => $("photo").click();
+$("photo").onchange = async e => {
+  const f = e.target.files[0]; e.target.value = "";
+  if(!f) return;
+  setStatus("Foto wird gelesen …");
+  try{
+    const bmp = await createImageBitmap(f);
+    const text = await decodeSource(bmp, bmp.width, bmp.height);
+    if(text) handleCode(text);
+    else setStatus("Kein QR-Code im Foto gefunden. Näher ran, scharf und gerade fotografieren.","err");
+  }catch{
+    setStatus("Foto konnte nicht gelesen werden.","err");
+  }
+};
 
 /* ---------- Start ---------- */
 $("login").onclick = login;
